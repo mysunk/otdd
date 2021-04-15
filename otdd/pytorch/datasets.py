@@ -8,7 +8,7 @@ import string
 import numpy as np
 import torch
 from torch.distributions.multivariate_normal import MultivariateNormal
-from torch.utils.data import TensorDataset
+from torch.utils.data import TensorDataset, Subset
 import torch.nn as nn
 import torch.utils.data as torchdata
 import torch.utils.data.dataloader as dataloader
@@ -25,11 +25,12 @@ import sentence_transformers as st
 
 import h5py
 
+from .nets import BoWSentenceEmbedding
+from .sqrtm import create_symm_matrix
 from .. import ROOT_DIR, HOME_DIR
 
 from .utils import interleave, process_device_arg, random_index_split, \
-                   spectrally_prescribed_matrix, rot, rot_evecs
-
+    spectrally_prescribed_matrix, rot, rot_evecs, load_full_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -256,100 +257,48 @@ def make_gmm_dataset(config='random', classes=10,dim=2,samples=10,spread = 1,
     if shuffle:
         indx = torch.arange(Y.shape[0])
         print(indx)
-        X = X[idxs, :]
-        Y = Y[idxs]
+        X = X[indx, :]
+        Y = Y[indx]
     return X, Y, distribs
 
-def load_torchvision_data(dataname, valid_size=0.1, splits=None, shuffle=True,
+
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+
+class CERDataset(Dataset):
+
+    def __init__(self, data, label, transform = None):
+        self.data = data
+        self.targets = label
+
+    def __len__(self):
+        return self.data.shape[0]
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        return self.data[idx], self.targets[idx]
+
+
+def load_torchvision_data(data, label, test_size = 0.2, valid_size=0.1, splits=None, shuffle=True,
                     stratified=False, random_seed=None, batch_size = 64,
-                    resize=None, to3channels=False,
-                    maxsize = None, maxsize_test=None, num_workers = 0, transform=None,
-                    data=None, datadir=None, download=True, filt=False, print_stats = False):
+                    maxsize = None, maxsize_test=None, num_workers = 0):
     """ Load torchvision datasets.
 
         We return train and test for plots and post-training experiments
     """
-    if shuffle == True and random_seed:
-        np.random.seed(random_seed)
-    if transform is None:
-        if dataname in DATASET_NORMALIZATION.keys():
-            transform_dataname = dataname
-        else:
-            transform_dataname = 'ImageNet'
 
+    x_train, x_test, y_train, y_test = train_test_split(data, label, test_size = test_size, stratify=label)
+    train, test = CERDataset(x_train, y_train), CERDataset(x_test, y_test)
 
-        transform_list = []
-
-        if dataname in ['MNIST', 'USPS'] and to3channels:
-            transform_list.append(torchvision.transforms.Grayscale(3))
-
-        transform_list.append(torchvision.transforms.ToTensor())
-        transform_list.append(
-            torchvision.transforms.Normalize(*DATASET_NORMALIZATION[transform_dataname])
-        )
-
-        if resize:
-            if not dataname in DATASET_SIZES or DATASET_SIZES[dataname][0] != resize:
-                ## Avoid adding an "identity" resizing
-                transform_list.insert(0, transforms.Resize((resize, resize)))
-
-        transform = transforms.Compose(transform_list)
-        logger.info(transform)
-        train_transform, valid_transform = transform, transform
-    elif data is None:
-        if len(transform) == 1:
-            train_transform, valid_transform = transform, transform
-        elif len(transform) == 2:
-            train_transform, valid_transform = transform
-        else:
-            raise ValueError()
-
-    if data is None:
-        DATASET = getattr(torchvision.datasets, dataname)
-        if datadir is None:
-            datadir = os.path.join(ROOT_DIR,'data/')
-        if dataname == 'EMNIST':
-            split = 'letters'
-            train = DATASET(datadir, split=split, train=True, download=True, transform=train_transform)
-            test = DATASET(datadir, split=split, train=False, download=True, transform=valid_transform)
-            ## EMNIST seems to have a bug - classes are wrong
-            _merged_classes = set(['C', 'I', 'J', 'K', 'L', 'M', 'O', 'P', 'S', 'U', 'V', 'W', 'X', 'Y', 'Z'])
-            _all_classes = set(list(string.digits + string.ascii_letters))
-            classes_split_dict = {
-                'byclass': list(_all_classes),
-                'bymerge': sorted(list(_all_classes - _merged_classes)),
-                'balanced': sorted(list(_all_classes - _merged_classes)),
-                'letters': list(string.ascii_lowercase),
-                'digits': list(string.digits),
-                'mnist': list(string.digits),
-            }
-            train.classes = classes_split_dict[split]
-            if split == 'letters':
-                ## The letters fold (and only that fold!!!) is 1-indexed
-                train.targets -= 1
-                test.targets -= 1
-        elif dataname == 'STL10':
-            train = DATASET(datadir, split='train', download=True, transform=train_transform)
-            test = DATASET(datadir, split='test', download=True, transform=valid_transform)
-            train.classes = ['airplane', 'bird', 'car', 'cat', 'deer', 'dog', 'horse', 'monkey', 'ship', 'truck']
-            test.classes = train.classes
-            train.targets = torch.tensor(train.labels)
-            test.targets = torch.tensor(test.labels)
-        else:
-            train = DATASET(datadir, train=True, download=True, transform=train_transform)
-            test = DATASET(datadir, train=False, download=True, transform=valid_transform)
-    else:
-        train, test = data
-
-
-    if type(train.targets) is list:
+    if type(train.targets) is list or type(train.targets) is np.ndarray:
         train.targets = torch.LongTensor(train.targets)
         test.targets  = torch.LongTensor(test.targets)
 
     if not hasattr(train, 'classes') or not train.classes:
         train.classes = sorted(torch.unique(train.targets).tolist())
-        test.classes  = sorted(torch.unique(train.targets).tolist())
-
+        test.classes = sorted(torch.unique(train.targets).tolist())
 
     ### Data splitting
     fold_idxs    = {}
@@ -361,26 +310,6 @@ def load_torchvision_data(dataname, valid_size=0.1, splits=None, shuffle=True,
         train_idx, valid_idx = random_index_split(len(train), 1-valid_size, (maxsize, None)) # No maxsize for validation
         fold_idxs['train'] = train_idx
         fold_idxs['valid'] = valid_idx
-    elif splits is not None:
-        ## Custom splits - must be integer.
-        if type(splits) is dict:
-            snames, slens = zip(*splits.items())
-        elif type(splits) in [list, np.ndarray]:
-            snames = ['split_{}'.format(i) for i in range(len(splits))]
-            slens  = splits
-        idxs = np.arange(len(train))
-        if not stratified:
-            np.random.shuffle(idxs)
-        else:
-            ## If stratified, we'll interleave the per-class shuffled indices
-            idxs_class = [np.random.permutation(np.where(train.targets==c)).T for c in np.unique(train.targets)]
-            idxs = interleave(*idxs_class).squeeze().astype(int)
-
-        slens = np.array(slens).cumsum() # Need to make cumulative for np.split
-        split_idxs = [np.sort(s) for s in np.split(idxs, slens)[:-1]] # The last one are leftovers
-        assert len(split_idxs) == len(splits)
-        fold_idxs = {snames[i]: v for i,v in enumerate(split_idxs)}
-
 
     for k, idxs in fold_idxs.items():
         if maxsize and maxsize < len(idxs):
@@ -388,7 +317,6 @@ def load_torchvision_data(dataname, valid_size=0.1, splits=None, shuffle=True,
 
     sampler_class = SubsetRandomSampler if shuffle else SubsetSampler
     fold_samplers = {k: sampler_class(idxs) for k,idxs in fold_idxs.items()}
-
 
     ### Create DataLoaders
     dataloader_args = dict(batch_size=batch_size,num_workers=num_workers)
@@ -671,7 +599,7 @@ def combine_datasources(dset, dset_extra, valid_size=0, shuffle=True, random_see
         X = X.reshape(-1, 1, d, d)
         dset = torch.utils.data.TensorDataset(X, Y)
         logger.info(f'Main data size. X: {X.shape}, Y: {Y.shape}')
-    elif isinstance(dst, torch.utils.data.Dataset):
+    elif isinstance(dset, torch.utils.data.Dataset):
         raise NotImplemented('Error: combine_datasources cant take Datasets yet.')
 
     merged_dset = torch.utils.data.ConcatDataset([dset, dset_extra])
