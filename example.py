@@ -2,8 +2,8 @@ from otdd.pytorch.datasets import load_torchvision_data
 from otdd.pytorch.distance import DatasetDistance
 
 # Load data
-loaders_src  = load_torchvision_data('MNIST', valid_size=0, resize = 28, maxsize=2000)[0]
-loaders_tgt  = load_torchvision_data('USPS',  valid_size=0, resize = 28, maxsize=2000)[0]
+loaders_src  = load_torchvision_data(data = data_src, label = label_src, valid_size=0, resize = 28, maxsize=2000)[0]
+loaders_tgt  = load_torchvision_data(data = data_tgt, label = label_tgt,  valid_size=0, resize = 28, maxsize=2000)[0]
 
 # Instantiate distance
 dist = DatasetDistance(loaders_src['train'], loaders_tgt['train'],

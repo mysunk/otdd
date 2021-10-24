@@ -78,7 +78,7 @@ class DatasetDistance():
             approximated and appended to each point, if 'precomputed_labeldist',
             the label-to-label distance is computed exactly in advance.
         symmetric_tasks (bool): whether the two underlying datasets are the same
-            (e.g., when computing distance between subsets of classes).
+            (e.g., when comiputing distance between subsets of classes).
         feature_cost (str or callable): if not 'euclidean', must be a callable
             that implements a cost function between feature vectors.
         src_embedding (callable, optional): if provided, source data will be
